@@ -1,0 +1,19 @@
+[project]
+name = "ktmc"
+version = "0.1.0"
+description = ""
+authors = [{ name = "Kenneth Ashley", email = "ken.u.diggitt@gmail.com" }]
+readme = "README.md"
+requires-python = ">=3.9,<3.13"
+dependencies = ["bittensor (>=9.0.3,<10.0.0)"]
+
+[tool.poetry]
+packages = [{ include = "ktmc", from = "src" }]
+
+[tool.poetry.scripts]
+start = "ktmc.main:main"
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
