@@ -11,43 +11,96 @@ class Bot:
         self.subtensor = subtensor
         self.netuid = netuid
         self.stake_amount = stake_amount
+    
+    async def wait_epoch(self):
+        q_tempo = [v for (k, v) in self.subtensor.query_map_subtensor("Tempo") if k == self.netuid]
+        if len(q_tempo) == 0:
+            raise Exception("could not determine tempo")
+        tempo = q_tempo[0].value
+        logging.info(f"tempo = {tempo}")
 
+        await self.wait_interval(tempo)
 
-    async def wait_for_next_epoch(self):
-        try:
-            query_result = self.subtensor.query_map_subtensor("Tempo")
-            tempo_dict = {}
-            for k, v in query_result:
-                key = k if isinstance(k, int) else k.value if hasattr(k, 'value') else int(k)
-                tempo_dict[key] = v
+    def next_tempo(self, current_block: int, tempo: int) -> int:
+        interval = tempo + 1
+        last_epoch = current_block - 1 - (current_block + self.netuid + 1) % interval
+        next_tempo_ = last_epoch + interval
+        return next_tempo_
 
-            if self.netuid not in tempo_dict:
-                raise Exception(f"Netuid {self.netuid} not found in tempo map")
+    async def wait_interval(self, tempo):
+        reporting_interval: int = 1
+        current_block = self.subtensor.get_current_block()
+        next_tempo_block_start = self.next_tempo(current_block, tempo)
+        last_reported = None
 
-            tempo_obj = tempo_dict[self.netuid]
-            tempo = int(tempo_obj.value) if hasattr(tempo_obj, 'value') else int(tempo_obj)
-            logger.info(f"Tempo for subnet {self.netuid} = {tempo}")
-
-            interval = tempo + 1
+        while current_block < next_tempo_block_start:
+            await asyncio.sleep(0.25)
             current_block = self.subtensor.get_current_block()
-            last_epoch = current_block - 1 - (current_block + self.netuid + 1) % interval
-            next_tempo_block_start = last_epoch + interval
 
-            logger.info(f"Current block: {current_block}")
-            logger.info(f"Next epoch block: {next_tempo_block_start}")
-            logger.info(f"Blocks until next epoch: {next_tempo_block_start - current_block}")
+            if last_reported is None or current_block - last_reported >= reporting_interval:
+                last_reported = current_block
+                print(
+                    f"Current Block: {current_block}  Next tempo for netuid {self.netuid} at: {next_tempo_block_start}"
+                )
+                logging.info(
+                    f"Current Block: {current_block}  Next tempo for netuid {self.netuid} at: {next_tempo_block_start}"
+                )
 
-            while current_block < next_tempo_block_start - 3:
-                await asyncio.sleep(1)
+    async def execute_strategy(self):
+        try:
+            # Wait for next epoch
+            await self.wait_epoch()
+
+            # Get next tempo block
+            current_block = self.subtensor.get_current_block()
+            tempo_result = [v for (k, v) in self.subtensor.query_map_subtensor("Tempo") if k == self.netuid]
+            tempo = tempo_result[0].value
+            next_epoch_block = self.next_tempo(current_block, tempo)
+
+            # LeStakeBefore
+            stake_at_block = next_epoch_block - 3
+
+            # LeWait
+            while current_block < stake_at_block:
+                await asyncio.sleep(0.25)
                 current_block = self.subtensor.get_current_block()
-                if (current_block % 10) == 0:
-                    logger.info(f"Current block: {current_block}, Blocks until epoch: {next_tempo_block_start - current_block}")
 
-            return next_tempo_block_start
+            # LeConvert
+            stake_amount_rao = int(self.stake_amount * 10**9)
 
+            logger.info(f"Staking {self.stake_amount} TAO to subnet {self.netuid} at block {current_block}")
+
+            # LeStake
+            self.subtensor.add_stake(
+                wallet=self.wallet,
+                hotkey=self.wallet.get_hotkey(),
+                amount=stake_amount_rao
+            )
+
+            logger.info(f"Successfully staked to subnet {self.netuid}")
+            
+            unstake_at_block = next_epoch_block + 1
+            
+            current_block = self.subtensor.get_current_block()
+            while current_block < unstake_at_block:
+                await asyncio.sleep(0.25)
+                current_block = self.subtensor.get_current_block()
+            
+            logger.info(f"Unstaking from subnet {self.netuid} at block {current_block}")
+
+            # LeUnstake
+            self.subtensor.unstake(
+                wallet=self.wallet,
+                hotkey=self.wallet.get_hotkey(),
+                amount=stake_amount_rao
+            )
+            
+            logger.info(f"Successfully unstaked from subnet {self.netuid}")
+            
+            return True
         except Exception as e:
-            logger.error(f"Error determining next epoch: {e}")
-            raise
+            logger.error(f"Error executing MEV strategy: {e}")
+            return False
 
 async def run_continously():
     wallet = bt.wallet(name='default')
@@ -59,7 +112,6 @@ async def run_continously():
         try:
             await bot.execute_strategy()
 
-            await asyncio.sleep(60)
         except Exception as e:
             logger.error(f"Error in Bot loop: {e}")
             await asyncio.sleep(60)
